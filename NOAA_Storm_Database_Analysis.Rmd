@@ -1,0 +1,229 @@
+---
+title: "NOAA Storm Database Analysis"
+author: "kuriboh"
+date: "7/21/2020"
+output: html_document
+---
+
+# An analysis on impact of differrent types of natural disaster on economy and population's health in the US.  
+
+This analysis bases on the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database. This database tracks characteristics of major storms and weather events in the United States. This will focus on analyzing how natural disasters affected the society in the US in the period of 1950-2011. About the consequence in people's heath, the number of direct / indirect deaths and injuries cases reported is report. The impact in economy is calculated as total damage on properties, crops, and is reported in USD unit.  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+### Data processing  
+
+* The following packages are required for this analysis  
+```{r}
+required_packages <- c('dplyr', 'ggplot2')
+for (package in required_packages) {
+    if (!package %in% rownames(installed.packages())) {
+        install.packages(package)
+    }
+}
+library(dplyr)
+library(ggplot2)
+```
+  
+* The data is downloaded from the following URL and saved locally.  
+```{r}
+data_url <- 'https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2'
+file_path <- 'raw_data/compressed.csv.bz2'
+
+raw_data_description <- 'https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf'
+
+download.file(data_url, file_path)
+download.file(raw_data_description, 'raw_data/data_description.pdf')
+```
+  
+* This code is used to read data into memory.  
+```{r, cache = T}
+storm_data <- read.csv(file_path)
+```
+
+  
+* As the main purpose of the analysis, the following columns will be discarded to minimize the processed data.  
+```{r}
+discarded_columns <- c('REMARKS', 'REFNUM', 'LATITUDE', 'LONGITUDE',
+                       'LATITUDE_E', 'LONGITUDE_', 'ZONENAMES', 'STATEOFFIC',
+                       'WFO', 'BGN_TIME', 'TIME_ZONE', 'COUNTY', 'COUNTYNAME',
+                       'END_TIME', 'COUNTY_END', 'COUNTYENDN', 'END_RANGE',
+                       'END_LOCATI', 'BGN_RANGE', 'BGN_LOCATI', 'BGN_AZI',
+                       'END_AZI', 'LENGTH', 'WIDTH', 'STATE__', 'MAG', 'F',
+                       'BGN_DATE', 'END_DATE', 'STATE'
+)
+
+for (colname in discarded_columns) {
+    storm_data[colname] <- NULL
+}
+```
+  
+* The classes of event that appeared in the data set is defined as following, the same-referring events are put into the same vector.  
+```{r}
+original_event_types <- list('tornado', 'hail', 'rain', 'snow', 'storm', 'dry',
+                             'sleet', 'cloud', 'thunder', 'lightning', 'flood',
+                             'drizzle', 'drought', 'frost', 'cold', 'eruption',
+                             'fog', 'dust', 'waterspout', 'blizzard', 'tsunami',
+                             c('wind', 'gust'),
+                             c('tidal', 'tide'),
+                             c('erosion', 'erosin'),
+                             c('avalanche', 'avalance'),
+                             c('tide', 'wave', 'surge'),
+                             c('hurricane', 'whirlwind', 'typhoon'),
+                             c('landslump', 'landslide', 'mudslide')
+                          )
+```
+  
+* The new data set is constructed as defined event types above. Any original event type (EVTYPE) that have any event's name as sub-string are consider being one of that event. 
+```{r, cache = T}
+# Convert all character to lower case  
+storm_data$EVTYPE <- tolower(storm_data$EVTYPE)
+storm_data$PROPDMGEXP <- tolower(storm_data$PROPDMGEXP)
+storm_data$CROPDMGEXP <- tolower(storm_data$CROPDMGEXP)
+
+construct_new_data <- function (other_storm_data) {
+    new_variable_name <- 'event_type'
+    new_storm_data <- list()
+    counter <- 1
+    
+    for (i in 1:nrow(other_storm_data)) {
+        key_words <- strsplit(other_storm_data[i, 'EVTYPE'],
+                              paste(c('/', ' '), collapse = '|'))
+        # Consider all event class
+        for (original_event_type in original_event_types) {
+            found <- F
+            # Consider all event's name of that class
+            for (my_type in original_event_type) {
+                # If that original event type contains the keyword, then this event is one of the current class of event
+                if (my_type %in% key_words) {
+                    found = T
+                    break
+                }
+            }
+            # The current row is classified into event classes here
+            if (found) {
+                # Discard the first column (EVTYPE)
+                new_row <- other_storm_data[i, -1]
+                # Add event class
+                new_row[new_variable_name] <- original_event_type[[1]][1]
+                # Add to the new data set
+                new_storm_data[[counter]] <- new_row
+                counter <- counter + 1
+            }
+        }
+    }
+    dplyr::bind_rows(new_storm_data)
+}
+
+system.time(new_storm_data <- construct_new_data(storm_data))
+```
+  
+* The data for analyzing heath impact is formed there. The new data set will contain 3 columns, event's type, number of deaths / injuries, and the status (dead, or just injuried).  
+```{r}
+create_heath_data <- function (input_data) {
+    heath_properties <- input_data[, c('FATALITIES', 'INJURIES', 'event_type')]
+    fatalities <- heath_properties[, c('FATALITIES', 'event_type')]
+    # All statuses are fatalities
+    fatalities$heath_type <- rep('fatalities', nrow(heath_properties))
+    names(fatalities) <- c('count', 'event_type', 'heath_type')
+    
+    injuries <- heath_properties[, c('INJURIES', 'event_type')]
+    # All statuses are injuries
+    injuries$heath_type <- rep('injuries', nrow(heath_properties))
+    names(injuries) <- c('count', 'event_type', 'heath_type')
+    
+    # Bind injuries and deaths by row into a new data set
+    rbind(fatalities, injuries)
+}
+heath_data <- create_heath_data(new_storm_data)
+```
+  
+* About economic consequence, the damage is calculated as sum of properties damage with crop damage.  
+```{r, cache = T}
+system.time(
+    economic_data <- apply(new_storm_data, MARGIN = 1, function (row) {
+        # 'k', 'm', 'b' means '1000', '1000000', '1000000000' respectively, as the properties and crop damages were written as unit (in the PROPDMG and CROPDMG) and suffix 'k', 'b', 'm' (in the PROPDMGEXP and CROPDMGEXP).
+        calc_exp <- function (ch) {
+            if (ch == 'k') {
+                return (1e3)
+            } else {
+                if (ch == 'm') {
+                    return (1e6)
+                } else {
+                    if (ch == 'b') {
+                        return (1e9)
+                    } else {
+                        return (0)
+                    }
+                }
+            }
+        }
+        calc_origin <- function (num) {
+            if (!is.na(as.numeric(num))) {
+                return (as.numeric(num))
+            }
+            return (0)
+        }
+        
+        economic_damage <- calc_origin(row[['PROPDMG']]) * calc_exp(row[['PROPDMGEXP']]) +
+                           calc_origin(row[['CROPDMG']]) * calc_exp(row[['CROPDMGEXP']])
+        
+        data.frame(event_type = row[['event_type']], damage = economic_damage)
+    }) %>% 
+        dplyr::bind_rows()
+)
+```
+  
+### Results  
+```{r}
+heath_data_set <- aggregate(formula = count ~ event_type + heath_type,
+                            data = heath_data,
+                            FUN = sum, na.rm = T)
+with(heath_data_set,
+        ggplot2::ggplot(heath_data_set,
+                        aes(x = reorder(event_type, count),
+                            y = count,
+                            fill = event_type)
+        ) +
+        ggplot2::coord_flip() +
+        ggplot2::geom_bar(stat = 'identity') +
+        ggplot2::ggtitle('Heath problems caused by each event type') +
+        ggplot2::labs(x = 'Event type', y = 'Deaths and injuries count') +
+        ggplot2::theme(legend.position = 'none',
+                       plot.title = element_text(hjust = 0.5)) + 
+        ggplot2::facet_grid(. ~ heath_type, scales = 'free_x')
+)
+```
+
+```{r}
+heath_data_set
+```
+
+```{r}
+sum_damage_by_event <- aggregate(damage ~ event_type,
+                                 data = economic_data,
+                                 FUN = sum)
+# Calculate as million dollars
+sum_damage_by_event$damage <- round(sum_damage_by_event$damage / 1e6, 2)
+
+with(sum_damage_by_event,
+        ggplot2::ggplot(sum_damage_by_event,
+                        aes(x = reorder(event_type, damage),
+                            y = damage,
+                            fill = event_type)) +
+        ggplot2::coord_flip() +
+        ggplot2::geom_bar(stat = 'identity') +
+        ggplot2::ggtitle('Economic damage caused by each event type') +
+        ggplot2::labs(x = 'Event type', y = 'Monetary damage (million dollars)') +
+        ggplot2::theme(legend.position = 'none',
+                       plot.title = element_text(hjust = 0.5))
+)
+```
+
+```{r}
+sum_damage_by_event
+```
+
